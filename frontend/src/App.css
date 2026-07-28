@@ -1021,6 +1021,45 @@
     max-height: calc(100vh - 84px);
     overflow-y: auto;
   }
+
+  /* Notification cards (dropdown + full Notification Center) had no
+     mobile-specific sizing at all — fine on a 600px+ panel, but tight on a
+     ~360px phone once the icon badge, unread dot, and two action pills are
+     all in play. Tighten padding/icon size and let the action row wrap
+     instead of relying on there always being room for both pills inline. */
+  .notif-card {
+    padding: 9px 10px;
+    gap: 8px;
+  }
+  .notif-card-icon {
+    width: 26px;
+    height: 26px;
+  }
+  .notif-card-toprow {
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+  .notif-card-type {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .notif-card-title,
+  .notif-card-message {
+    word-break: break-word;
+  }
+  .notif-card-actions {
+    flex-wrap: wrap;
+  }
+  .notif-card-action {
+    flex: 1 1 auto;
+    justify-content: center;
+  }
+  .notif-card-dot {
+    top: 9px;
+    right: 8px;
+  }
 }
 
 /* ─── Team / Members ─── */

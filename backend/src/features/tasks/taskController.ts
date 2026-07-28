@@ -6,13 +6,39 @@ import { cancelTaskReminders, syncTaskReminders } from "../reminders/reminderSer
 import { getIncompleteDependencies, wouldCreateCycle } from "./dependencyService.js";
 import { generateNextOccurrence } from "./recurrenceService.js";
 import { checkAndGrantAchievements } from "../achievements/achievementService.js";
+import { sendPushToUser } from "../../utils/push.js";
 
 type AuthedRequest = Request & { user?: { id: string; email: string } };
 
+const NOTIF_PUSH_TITLE: Record<"TASK_ASSIGNED" | "TASK_UPDATED" | "TASK_DELETED", string> = {
+    TASK_ASSIGNED: "Task assigned to you",
+    TASK_UPDATED: "Task updated",
+    TASK_DELETED: "Task deleted",
+};
+
+// In-app row (respects taskNotificationsEnabled) plus a real-time Web Push
+// alert (respects the separate pushEnabled preference, same gating the
+// reminder worker uses) — so assignments/updates/deletions reach the user
+// immediately instead of only showing up on the next 30s poll or manual
+// bell-open.
 const notifyAssignee = async (data: { userId: string; workspaceId: string; taskId?: string; type: "TASK_ASSIGNED" | "TASK_UPDATED" | "TASK_DELETED"; message: string }) => {
     const assignee = await prisma.user.findUnique({ where: { id: data.userId }, select: { taskNotificationsEnabled: true } });
     if (!assignee?.taskNotificationsEnabled) return;
-    await prisma.notification.create({ data });
+    const notification = await prisma.notification.create({ data });
+
+    const prefs = await prisma.notificationPreference.findUnique({ where: { userId: data.userId } });
+    if (!prefs || prefs.pushEnabled) {
+        await sendPushToUser(data.userId, {
+            title: NOTIF_PUSH_TITLE[data.type],
+            body: data.message,
+            tag: `notif-${notification.id}`,
+            url: data.taskId ? `/app/tasks?taskId=${data.taskId}` : "/app/notifications",
+            taskId: data.taskId,
+            notificationId: notification.id,
+            sound: prefs?.soundEnabled ?? true,
+            vibrate: prefs?.vibrationEnabled ?? true,
+        });
+    }
 };
 
 const TASK_INCLUDE = {

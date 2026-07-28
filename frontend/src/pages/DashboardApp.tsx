@@ -371,8 +371,13 @@ export default function DashboardApp() {
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { if (navPage === 'settings') loadSessions() }, [navPage, loadSessions])
 
+  // Web Push (see PUSH_RECEIVED handling below) is the real-time path now
+  // that every notification type triggers a push, not just due-date
+  // reminders — this poll only exists as a fallback for tabs where the
+  // user hasn't granted notification permission, so it can stay short
+  // without meaningfully increasing server load.
   useEffect(() => {
-    const interval = setInterval(loadNotifs, 30000)
+    const interval = setInterval(loadNotifs, 15000)
     return () => clearInterval(interval)
   }, [loadNotifs])
 
@@ -418,7 +423,7 @@ export default function DashboardApp() {
         const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`
         setToasts(prev => [...prev, { id, title: msg.title, body: msg.body, taskId: msg.data?.taskId }])
         setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 8000)
-        loadNotifs(); if (navPage === 'notifications') loadNotifList()
+        loadNotifs(); if (navPage === 'notifications' || showNotifs) loadNotifList()
       } else if (msg.type === 'TASK_COMPLETED') {
         loadTasks(); loadNotifs()
       } else if (msg.type === 'REMINDER_SNOOZED') {
@@ -429,7 +434,7 @@ export default function DashboardApp() {
     })
     return off
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [navPage])
+  }, [navPage, showNotifs])
 
   // Stripe/PayPal/Flutterwave checkout redirects land on /app/billing (the
   // static success/cancel URL configured server-side) — open the Billing

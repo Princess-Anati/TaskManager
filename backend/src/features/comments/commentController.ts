@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import prisma from "../../lib/prisma.js";
 import { createActivityLog } from "../../utils/activity.js";
 import { getMembership } from "../../utils/plan.js";
+import { sendPushToUser } from "../../utils/push.js";
 
 type AuthedRequest = Request & { user?: { id: string; email: string } };
 
@@ -9,10 +10,27 @@ const COMMENT_INCLUDE = {
     user: { select: { id: true, firstname: true, lastName: true, avatarUrl: true } },
 } as const;
 
+// In-app row plus a real-time Web Push alert, same pattern as
+// taskController's notifyAssignee — mentions and comments on your tasks
+// should reach you immediately, not just on the next poll.
 const notifyIfEnabled = async (userId: string, data: { workspaceId: string; taskId: string; message: string }) => {
     const user = await prisma.user.findUnique({ where: { id: userId }, select: { taskNotificationsEnabled: true } });
     if (!user?.taskNotificationsEnabled) return;
-    await prisma.notification.create({ data: { userId, type: "TASK_COMMENTED", ...data } });
+    const notification = await prisma.notification.create({ data: { userId, type: "TASK_COMMENTED", ...data } });
+
+    const prefs = await prisma.notificationPreference.findUnique({ where: { userId } });
+    if (!prefs || prefs.pushEnabled) {
+        await sendPushToUser(userId, {
+            title: "New comment",
+            body: data.message,
+            tag: `notif-${notification.id}`,
+            url: `/app/tasks?taskId=${data.taskId}`,
+            taskId: data.taskId,
+            notificationId: notification.id,
+            sound: prefs?.soundEnabled ?? true,
+            vibrate: prefs?.vibrationEnabled ?? true,
+        });
+    }
 };
 
 export const listComments = async (req: AuthedRequest, res: Response) => {

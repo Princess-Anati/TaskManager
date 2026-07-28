@@ -4,6 +4,7 @@ import prisma from "../../lib/prisma.js";
 import { createActivityLog } from "../../utils/activity.js";
 import { sendInvitationEmail } from "../../utils/email.js";
 import { assertWithinMemberLimit } from "../../utils/plan.js";
+import { sendPushToUser } from "../../utils/push.js";
 
 export const inviteByEmail = async (req: Request, res: Response) => {
     try {
@@ -88,16 +89,32 @@ export const inviteByEmail = async (req: Request, res: Response) => {
             });
         }
 
-        // Create a notification for the invited user if they have an account
+        // Create a notification for the invited user if they have an account,
+        // plus a real-time Web Push alert (same gating pattern used
+        // throughout — respects the user's pushEnabled preference).
         if (invitedUser) {
-            await prisma.notification.create({
+            const inviteMessage = `You've been invited to join the workspace "${workspace.name}"`;
+            const notification = await prisma.notification.create({
                 data: {
                     userId: invitedUser.id,
                     workspaceId,
                     type: "WORKSPACE_INVITED",
-                    message: `You've been invited to join the workspace "${workspace.name}"`,
+                    message: inviteMessage,
                 },
             });
+
+            const prefs = await prisma.notificationPreference.findUnique({ where: { userId: invitedUser.id } });
+            if (!prefs || prefs.pushEnabled) {
+                await sendPushToUser(invitedUser.id, {
+                    title: "Workspace invitation",
+                    body: inviteMessage,
+                    tag: `notif-${notification.id}`,
+                    url: "/app/notifications",
+                    notificationId: notification.id,
+                    sound: prefs?.soundEnabled ?? true,
+                    vibrate: prefs?.vibrationEnabled ?? true,
+                });
+            }
         }
 
         await createActivityLog({

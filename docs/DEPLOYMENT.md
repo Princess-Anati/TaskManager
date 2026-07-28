@@ -88,9 +88,30 @@ cheapest paid tier ($7/mo) removes it; nothing else in this guide changes.
    R2_SECRET_ACCESS_KEY=<from step 2>
    NODE_ENV=production
    ```
-   Optional (payments — the app already runs fine without these, those
-   routes just 503 until set): `STRIPE_SECRET_KEY`,
-   `PAYPAL_CLIENT_ID`/`PAYPAL_CLIENT_SECRET`, `FLUTTERWAVE_SECRET_KEY`.
+   Optional (payments — the app already runs fine without these, each
+   provider's own checkout/webhook routes just 503 until its keys are set,
+   independently of the others). See `backend/.env.example` for exactly
+   where to get each value:
+   ```
+   STRIPE_SECRET_KEY=
+   STRIPE_WEBHOOK_SECRET=
+   STRIPE_PRICE_PREMIUM_MONTHLY=
+   STRIPE_PRICE_PREMIUM_ANNUAL=
+   STRIPE_PRICE_TEAM_MONTHLY=
+   STRIPE_PRICE_TEAM_ANNUAL=
+   PAYPAL_CLIENT_ID=
+   PAYPAL_CLIENT_SECRET=
+   PAYPAL_API_BASE=https://api-m.paypal.com   # sandbox by default — switch to live once ready
+   PAYPAL_WEBHOOK_ID=
+   FLUTTERWAVE_SECRET_KEY=
+   FLUTTERWAVE_SECRET_HASH=
+   ```
+   Once the backend has a public Render URL (after step 5 below), register
+   each provider's webhook against it:
+   - Stripe: `https://<your-service>.onrender.com/api/payments/stripe/webhook`
+   - PayPal: `https://<your-service>.onrender.com/api/payments/paypal/webhook`
+   - Flutterwave: `https://<your-service>.onrender.com/api/payments/flutterwave/webhook`
+
    Optional (transactional email — invitations get logged to the console
    instead of emailed without it): `RESEND_API_KEY`, `EMAIL_FROM`.
 5. **Create Web Service**. First deploy takes a few minutes. Once live,

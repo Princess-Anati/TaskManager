@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import prisma from "../../lib/prisma.js";
 import { getMembership } from "../../utils/plan.js";
-import { activateSubscription, priceForPlan, recordPayment } from "./subscriptionService.js";
+import { activateSubscription, cancelSubscriptionFromProvider, markPastDue, priceForPlan, recordPayment, recordWebhookEvent } from "./subscriptionService.js";
 import * as stripeProvider from "./providers/stripe.js";
 import * as paypalProvider from "./providers/paypal.js";
 import * as flutterwaveProvider from "./providers/flutterwave.js";
@@ -83,6 +83,24 @@ export const createStripeCheckout = async (req: AuthedRequest, res: Response) =>
     }
 };
 
+// Metadata (workspaceId/userId/planKey/billingCycle) is set on the
+// Subscription at checkout time (see stripe.ts's subscription_data.metadata)
+// — Invoice objects don't reliably carry it themselves, so invoice-driven
+// events re-fetch the Subscription to read it back.
+const resolveSubscriptionMetadata = async (subscriptionId: string) => {
+    if (!stripeProvider.stripe) return null;
+    const subscription = await stripeProvider.stripe.subscriptions.retrieve(subscriptionId);
+    const metadata = subscription.metadata;
+    if (!metadata?.workspaceId || !metadata.userId || !metadata.planKey || !metadata.billingCycle) return null;
+    return {
+        workspaceId: metadata.workspaceId,
+        userId: metadata.userId,
+        planKey: metadata.planKey as Exclude<PlanKey, "FREE">,
+        billingCycle: metadata.billingCycle as BillingCycle,
+        customerId: typeof subscription.customer === "string" ? subscription.customer : subscription.customer?.id ?? null,
+    };
+};
+
 export const stripeWebhook = async (req: Request, res: Response) => {
     try {
         const signature = req.headers["stripe-signature"];
@@ -90,32 +108,80 @@ export const stripeWebhook = async (req: Request, res: Response) => {
 
         const event = stripeProvider.constructWebhookEvent(req.body as Buffer, signature);
 
-        if (event.type === "checkout.session.completed" || event.type === "customer.subscription.updated") {
-            const object = event.data.object as { metadata?: Record<string, string>; customer?: string; subscription?: string; id: string; amount_total?: number; currency?: string };
+        const isNewEvent = await recordWebhookEvent("STRIPE", event.id);
+        if (!isNewEvent) return res.status(200).json({ received: true, duplicate: true });
+
+        if (event.type === "checkout.session.completed") {
+            // Establishes the workspace<->Stripe linkage immediately on
+            // redirect back from Checkout. Payment recording is deferred to
+            // invoice.payment_succeeded below (fired for this same charge)
+            // so there's exactly one code path recording Stripe payments —
+            // covering the first invoice and every renewal identically —
+            // instead of double-counting the initial charge here too.
+            const object = event.data.object as { metadata?: Record<string, string>; customer?: string; subscription?: string };
             const metadata = object.metadata;
             if (metadata?.workspaceId && metadata.userId && metadata.planKey && metadata.billingCycle) {
-                const subscription = await activateSubscription({
+                await activateSubscription({
                     workspaceId: metadata.workspaceId,
                     userId: metadata.userId,
                     planKey: metadata.planKey as Exclude<PlanKey, "FREE">,
                     billingCycle: metadata.billingCycle as BillingCycle,
                     provider: "STRIPE",
                     providerCustomerId: typeof object.customer === "string" ? object.customer : null,
-                    providerSubscriptionId: typeof object.subscription === "string" ? object.subscription : object.id,
+                    providerSubscriptionId: typeof object.subscription === "string" ? object.subscription : undefined,
                 });
-                if (object.amount_total) {
+            }
+        } else if (event.type === "invoice.payment_succeeded") {
+            // Fires for every successful subscription invoice — the initial
+            // one and every renewal alike — with authoritative amount and
+            // billing-period bounds, so this is the single source of truth
+            // for Stripe payment history and period extension.
+            const invoice = event.data.object as {
+                id: string;
+                amount_paid: number;
+                currency: string;
+                period_start: number;
+                period_end: number;
+                parent?: { subscription_details?: { subscription?: string | { id: string } } | null } | null;
+            };
+            const subscriptionRef = invoice.parent?.subscription_details?.subscription;
+            const subscriptionId = typeof subscriptionRef === "string" ? subscriptionRef : subscriptionRef?.id;
+            if (subscriptionId) {
+                const meta = await resolveSubscriptionMetadata(subscriptionId);
+                if (meta) {
+                    const subscription = await activateSubscription({
+                        workspaceId: meta.workspaceId,
+                        userId: meta.userId,
+                        planKey: meta.planKey,
+                        billingCycle: meta.billingCycle,
+                        provider: "STRIPE",
+                        providerCustomerId: meta.customerId,
+                        providerSubscriptionId: subscriptionId,
+                        currentPeriodStart: new Date(invoice.period_start * 1000),
+                        currentPeriodEnd: new Date(invoice.period_end * 1000),
+                    });
                     await recordPayment({
                         subscriptionId: subscription.id,
-                        userId: metadata.userId,
+                        userId: meta.userId,
                         provider: "STRIPE",
-                        providerPaymentId: object.id,
-                        amountCents: object.amount_total,
-                        currency: (object.currency || "usd").toUpperCase(),
-                        billingCycle: metadata.billingCycle as BillingCycle,
+                        providerPaymentId: invoice.id,
+                        amountCents: invoice.amount_paid,
+                        currency: (invoice.currency || "usd").toUpperCase(),
+                        billingCycle: meta.billingCycle,
                         status: "SUCCEEDED",
                     });
                 }
             }
+        } else if (event.type === "invoice.payment_failed") {
+            const invoice = event.data.object as {
+                parent?: { subscription_details?: { subscription?: string | { id: string } } | null } | null;
+            };
+            const subscriptionRef = invoice.parent?.subscription_details?.subscription;
+            const subscriptionId = typeof subscriptionRef === "string" ? subscriptionRef : subscriptionRef?.id;
+            if (subscriptionId) await markPastDue(subscriptionId, "Stripe payment failed");
+        } else if (event.type === "customer.subscription.deleted") {
+            const object = event.data.object as { id: string };
+            await cancelSubscriptionFromProvider(object.id);
         }
 
         return res.status(200).json({ received: true });
@@ -191,10 +257,41 @@ export const paypalWebhook = async (req: Request, res: Response) => {
         const verified = await paypalProvider.verifyWebhookSignature(req.headers as Record<string, string>, req.body);
         if (!verified) return res.status(400).json({ message: "Webhook signature verification failed" });
 
+        const body = req.body as { id?: string; event_type?: string; resource?: { custom_id?: string; id?: string; amount?: { value?: string; currency_code?: string } } };
+        if (!body.id) return res.status(200).json({ received: true });
+
+        const isNewEvent = await recordWebhookEvent("PAYPAL", body.id);
+        if (!isNewEvent) return res.status(200).json({ received: true, duplicate: true });
+
         // The capture endpoint above is what actually activates the
-        // subscription (PayPal's redirect-then-capture flow); this webhook
-        // is an audit-trail / redundancy hook, deliberately a no-op beyond
-        // signature verification so it can't double-activate.
+        // subscription on success (PayPal's redirect-then-capture flow) —
+        // this webhook stays a no-op for completions, to avoid
+        // double-activating. It does record failed/denied captures though,
+        // since those never hit our capture endpoint and would otherwise
+        // leave no trace in payment history at all.
+        if (body.event_type === "PAYMENT.CAPTURE.DENIED" && body.resource?.custom_id) {
+            try {
+                const meta = JSON.parse(body.resource.custom_id) as { workspaceId?: string; userId?: string; planKey?: string; billingCycle?: string };
+                if (meta.workspaceId && meta.userId && meta.planKey && meta.billingCycle) {
+                    const subscription = await prisma.subscription.findUnique({ where: { workspaceId: meta.workspaceId } });
+                    if (subscription && body.resource.id) {
+                        await recordPayment({
+                            subscriptionId: subscription.id,
+                            userId: meta.userId,
+                            provider: "PAYPAL",
+                            providerPaymentId: body.resource.id,
+                            amountCents: Math.round(parseFloat(body.resource.amount?.value || "0") * 100),
+                            currency: body.resource.amount?.currency_code || "USD",
+                            billingCycle: meta.billingCycle as BillingCycle,
+                            status: "FAILED",
+                        });
+                    }
+                }
+            } catch {
+                // Malformed custom_id — nothing to attribute the failure to.
+            }
+        }
+
         return res.status(200).json({ received: true });
     } catch (error) {
         console.error("[paypal webhook]", error);
@@ -274,6 +371,9 @@ export const flutterwaveWebhook = async (req: Request, res: Response) => {
         const transactionId = body.data?.id ? String(body.data.id) : undefined;
         if (!transactionId) return res.status(200).json({ received: true });
 
+        const isNewEvent = await recordWebhookEvent("FLUTTERWAVE", transactionId);
+        if (!isNewEvent) return res.status(200).json({ received: true, duplicate: true });
+
         // Re-verify against Flutterwave's API rather than trusting the
         // webhook body directly (see verifyTransaction's docstring).
         const result = await flutterwaveProvider.verifyTransaction(transactionId);
@@ -295,6 +395,22 @@ export const flutterwaveWebhook = async (req: Request, res: Response) => {
                 billingCycle: result.billingCycle,
                 status: "SUCCEEDED",
             });
+        } else if (result.workspaceId) {
+            // Not successful (failed/cancelled) — still record it so payment
+            // history shows the attempt rather than leaving no trace.
+            const subscription = await prisma.subscription.findUnique({ where: { workspaceId: result.workspaceId } });
+            if (subscription) {
+                await recordPayment({
+                    subscriptionId: subscription.id,
+                    userId: result.userId,
+                    provider: "FLUTTERWAVE",
+                    providerPaymentId: result.transactionId,
+                    amountCents: result.amountCents,
+                    currency: result.currency,
+                    billingCycle: result.billingCycle,
+                    status: "FAILED",
+                });
+            }
         }
 
         return res.status(200).json({ received: true });

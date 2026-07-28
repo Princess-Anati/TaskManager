@@ -466,3 +466,16 @@ model Payment {
   subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
   user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
+
+// Event-level idempotency ledger for provider webhooks — checked (and
+// written to) before any side effects run, so a redelivered webhook short-
+// circuits immediately instead of relying only on downstream unique
+// constraints (e.g. Payment.providerPaymentId) to absorb duplicates.
+model WebhookEvent {
+  id         String          @id @default(uuid())
+  provider   PaymentProvider
+  externalId String
+  createdAt  DateTime        @default(now())
+
+  @@unique([provider, externalId])
+}

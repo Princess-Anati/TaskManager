@@ -183,6 +183,8 @@ export default function DashboardApp() {
   const [tasks, setTasks] = useState<Task[]>([])
   const [workspaceName, setWorkspaceName] = useState('')
   const [workspaceDescription, setWorkspaceDescription] = useState('')
+  const [deleteWorkspaceConfirm, setDeleteWorkspaceConfirm] = useState('')
+  const [deletingWorkspace, setDeletingWorkspace] = useState(false)
   const [taskTitle, setTaskTitle] = useState('')
   const [taskDescription, setTaskDescription] = useState('')
   const [taskPriority, setTaskPriority] = useState('MEDIUM')
@@ -454,6 +456,28 @@ export default function DashboardApp() {
       await loadWorkspaces(); showMessage('Workspace created', 'success')
       return true
     } catch (err) { showMessage(err instanceof Error ? err.message : 'Unable to create workspace', 'error'); return false }
+  }
+
+  // Irreversible — the confirmation input above this (must match the
+  // workspace name exactly) is the actual safeguard; this just executes
+  // once that's satisfied. Falls back to another workspace the user
+  // belongs to if one exists, otherwise the onboarding wizard reappears on
+  // its own (it's driven by workspaces.length === 0, see the effect above).
+  const handleDeleteWorkspace = async () => {
+    const target = workspaces.find(w => w.id === selectedWorkspaceId)
+    if (!target || deleteWorkspaceConfirm.trim() !== target.name) return
+    setDeletingWorkspace(true)
+    try {
+      await request(`/api/workspaces/${selectedWorkspaceId}`, { method: 'DELETE' })
+      setSelectedWorkspaceId(workspaces.find(w => w.id !== selectedWorkspaceId)?.id || '')
+      setDeleteWorkspaceConfirm('')
+      await loadWorkspaces()
+      showMessage(`"${target.name}" was deleted`, 'info')
+    } catch (err) {
+      showMessage(err instanceof Error ? err.message : 'Unable to delete workspace', 'error')
+    } finally {
+      setDeletingWorkspace(false)
+    }
   }
 
   const handleCreateTask = async (e: FormEvent<HTMLFormElement>) => {
@@ -1355,6 +1379,44 @@ export default function DashboardApp() {
                   </div>
                 )}
               </div>
+
+              {myMembership?.role === 'OWNER' && selectedWs && (
+                <div className="panel full-width danger-zone">
+                  <h2>Danger zone</h2>
+                  <div className="danger-zone-row">
+                    <div>
+                      <strong>Delete this workspace</strong>
+                      <p>
+                        Permanently deletes "{selectedWs.name}" — every task, comment, file, and the workspace's
+                        billing history goes with it{members.length > 1 ? `, and the other ${members.length - 1} member${members.length - 1 === 1 ? '' : 's'} lose access immediately` : ''}.
+                        This cannot be undone.
+                      </p>
+                    </div>
+                    <div className="danger-zone-confirm">
+                      <label htmlFor="delete-workspace-confirm">
+                        Type <strong>{selectedWs.name}</strong> to confirm
+                      </label>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <input
+                          id="delete-workspace-confirm"
+                          value={deleteWorkspaceConfirm}
+                          onChange={e => setDeleteWorkspaceConfirm(e.target.value)}
+                          placeholder={selectedWs.name}
+                          autoComplete="off"
+                        />
+                        <button
+                          type="button"
+                          className="mini-btn danger-btn"
+                          disabled={deletingWorkspace || deleteWorkspaceConfirm.trim() !== selectedWs.name}
+                          onClick={handleDeleteWorkspace}
+                        >
+                          <Trash2 size={13} /> {deletingWorkspace ? 'Deleting…' : 'Delete workspace'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

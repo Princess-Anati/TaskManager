@@ -1117,6 +1117,65 @@
   flex-shrink: 0;
 }
 
+/* ─── Danger zone (irreversible workspace actions) ─── */
+.danger-zone {
+  border-color: rgba(248, 113, 113, 0.3);
+}
+.danger-zone h2 {
+  color: var(--danger);
+}
+.danger-zone-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+.danger-zone-row > div:first-child {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+.danger-zone-row strong {
+  display: block;
+  color: var(--text-primary);
+  font-size: 0.88rem;
+  margin-bottom: 4px;
+}
+.danger-zone-row p {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+.danger-zone-confirm {
+  flex: 1 1 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.danger-zone-confirm label {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+.danger-zone-confirm input {
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-base);
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  flex: 1;
+  min-width: 0;
+}
+.danger-zone-confirm input:focus {
+  outline: none;
+  border-color: var(--danger);
+}
+.danger-zone-confirm .danger-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 /* ─── Task list (My Tasks page) ─── */
 .task-list {
   display: flex;

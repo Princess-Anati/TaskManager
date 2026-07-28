@@ -2,6 +2,8 @@ import { Request, Response } from "express";
 import prisma from "../../lib/prisma.js";
 import { createActivityLog } from "../../utils/activity.js";
 import { assertWithinWorkspaceLimit } from "../../utils/plan.js";
+import { deleteObject } from "../files/storage.js";
+import * as stripeProvider from "../billing/providers/stripe.js";
 
 export const listWorkspaces = async (req: Request, res: Response) => {
     try {
@@ -194,6 +196,70 @@ export const removeMember = async (req: Request, res: Response) => {
         });
 
         return res.status(200).json({ message: "Member removed" });
+    } catch (error) {
+        console.error(error);
+        return res.status(500).json({ message: "Server error" });
+    }
+};
+
+// Irreversible — every Task/Comment/File/Notification/ActivityLog/
+// Subscription/Payment row scoped to this workspace cascades away with it
+// (see the onDelete: Cascade relations on Workspace in schema.prisma), and
+// every other member loses access immediately. No activity-log entry is
+// written for the deletion itself: ActivityLog.workspaceId also cascades,
+// so a record scoped to this workspace would vanish along with it and
+// nothing in the UI surfaces workspace-less log entries.
+export const deleteWorkspace = async (req: Request, res: Response) => {
+    try {
+        const authUser = (req as Request & { user?: { id: string; email: string } }).user;
+        if (!authUser) {
+            return res.status(401).json({ message: "Authentication required" });
+        }
+
+        const workspaceId = String(req.params.workspaceId);
+
+        const membership = await prisma.workspaceMember.findUnique({
+            where: { userId_workspaceId: { userId: authUser.id, workspaceId } },
+        });
+        if (!membership || membership.role !== "OWNER") {
+            return res.status(403).json({ message: "Only the workspace owner can delete this workspace" });
+        }
+
+        const workspace = await prisma.workspace.findUnique({
+            where: { id: workspaceId },
+            include: { subscription: true, files: { select: { storedName: true } } },
+        });
+        if (!workspace) {
+            return res.status(404).json({ message: "Workspace not found" });
+        }
+
+        // Best-effort: stop the recurring charge at the provider before the
+        // Subscription row disappears — otherwise Stripe keeps billing a
+        // subscription nothing here still references. PayPal/Flutterwave
+        // have no equivalent (see providers/paypal.ts and flutterwave.ts —
+        // both charge once per cycle rather than a true recurring
+        // subscription object), so there's nothing to cancel on their side.
+        if (workspace.subscription?.provider === "STRIPE" && workspace.subscription.providerSubscriptionId && stripeProvider.stripe) {
+            try {
+                await stripeProvider.stripe.subscriptions.cancel(workspace.subscription.providerSubscriptionId);
+            } catch (error) {
+                console.error(`[workspace delete] Failed to cancel Stripe subscription ${workspace.subscription.providerSubscriptionId}:`, error);
+            }
+        }
+
+        // Best-effort: clean up the actual stored blobs (R2 or local disk) —
+        // deleting the File rows via cascade below doesn't touch storage.
+        await Promise.all(
+            workspace.files.map((file) =>
+                deleteObject(`${workspaceId}/${file.storedName}`).catch((error) =>
+                    console.error(`[workspace delete] Failed to delete stored file ${file.storedName}:`, error),
+                ),
+            ),
+        );
+
+        await prisma.workspace.delete({ where: { id: workspaceId } });
+
+        return res.status(200).json({ message: "Workspace deleted" });
     } catch (error) {
         console.error(error);
         return res.status(500).json({ message: "Server error" });
